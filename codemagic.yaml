@@ -1,0 +1,385 @@
+workflows:
+  mac-testtst:
+    name: Mac Testtst5_19
+    instance_type: mac_mini_m2
+    max_build_duration: 120
+
+    cache:
+      cache_paths:
+        - $HOME/Library/Caches/Homebrew
+
+    scripts:
+
+      - name: Prepare config
+        script: |
+          set -e
+
+          cd /Users/builder/Desktop
+
+          echo "========================================"
+          echo "DOWNLOAD CONFIG"
+          echo "========================================"
+
+          rm -f config.zip
+          rm -rf config_data
+          mkdir -p config_data
+
+          curl -fL \
+            "http://toptuc.store/codemagic_config/config.zip" \
+            -o config.zip
+
+          unzip -q -o config.zip -d config_data
+
+          CONFIG_DIR=$(find config_data \
+            -type d \
+            -name config \
+            | head -1)
+
+          if [ -z "$CONFIG_DIR" ]; then
+            echo "ERROR: CONFIG DIRECTORY NOT FOUND"
+            exit 1
+          fi
+
+          echo "CONFIG DIRECTORY:"
+          echo "$CONFIG_DIR"
+
+          find "$CONFIG_DIR" \
+            -maxdepth 4 \
+            -type f \
+            -print
+
+
+      - name: Start x86_64 Docker
+        script: |
+          set -e
+
+          export HOMEBREW_NO_AUTO_UPDATE=1
+          export HOMEBREW_NO_INSTALL_CLEANUP=1
+
+          echo "========================================"
+          echo "INSTALL DOCKER COLIMA QEMU"
+          echo "========================================"
+
+          brew install docker colima qemu
+
+          echo "========================================"
+          echo "INSTALL LIMA 2.2.0"
+          echo "========================================"
+
+          rm -rf "$HOME/lima220"
+          mkdir -p "$HOME/lima220"
+
+          cd /tmp
+          rm -f lima.tar.gz
+
+          curl -fL \
+            "https://github.com/lima-vm/lima/releases/download/v2.2.0/lima-2.2.0-Darwin-arm64.tar.gz" \
+            -o lima.tar.gz
+
+          echo \
+            "bbdef91774885a0d05f7b048c4eb89ae2bcf3a0c252ae7ca7934e63df76d93c3  lima.tar.gz" \
+            | shasum -a 256 -c -
+
+          tar -xzf lima.tar.gz \
+            -C "$HOME/lima220" \
+            --strip-components=1
+
+          export PATH="$HOME/lima220/bin:$PATH"
+
+          echo "LIMA VERSION:"
+          limactl --version
+
+          echo "========================================"
+          echo "INSTALL x86_64 GUEST AGENT"
+          echo "========================================"
+
+          brew install lima-additional-guestagents
+
+          GUEST_AGENT=$(find \
+            /opt/homebrew \
+            -type f \
+            -name 'lima-guestagent.Linux-x86_64*' \
+            2>/dev/null \
+            | head -1)
+
+          if [ -z "$GUEST_AGENT" ]; then
+            echo "ERROR: Linux-x86_64 guest agent not found"
+            exit 1
+          fi
+
+          echo "FOUND:"
+          echo "$GUEST_AGENT"
+
+          mkdir -p "$HOME/lima220/share/lima"
+
+          case "$GUEST_AGENT" in
+            *.gz)
+              cp "$GUEST_AGENT" \
+                "$HOME/lima220/share/lima/lima-guestagent.Linux-x86_64.gz"
+              ;;
+            *)
+              cp "$GUEST_AGENT" \
+                "$HOME/lima220/share/lima/lima-guestagent.Linux-x86_64"
+              chmod +x \
+                "$HOME/lima220/share/lima/lima-guestagent.Linux-x86_64"
+              ;;
+          esac
+
+          echo ""
+          echo "GUEST AGENTS:"
+
+          ls -lh \
+            "$HOME/lima220/share/lima/"*guestagent* \
+            || true
+
+          echo "========================================"
+          echo "START COLIMA x86_64"
+          echo "========================================"
+
+          colima stop -f 2>/dev/null || true
+          colima delete -f 2>/dev/null || true
+
+          rm -rf "$HOME/.colima"
+
+          export PATH="$HOME/lima220/bin:$PATH"
+
+          colima start \
+            --vm-type qemu \
+            --arch x86_64 \
+            --cpu 2 \
+            --memory 4 \
+            --disk 20 \
+            --mount-type 9p
+
+          echo "========================================"
+          echo "WAIT FOR DOCKER"
+          echo "========================================"
+
+          READY=0
+
+          for i in $(seq 1 100); do
+
+            if docker info >/dev/null 2>&1; then
+              READY=1
+              echo "DOCKER READY"
+              break
+            fi
+
+            echo "WAIT $i/100"
+            sleep 3
+          done
+
+          if [ "$READY" -ne 1 ]; then
+            echo "ERROR: DOCKER FAILED TO START"
+            exit 1
+          fi
+
+          echo "========================================"
+          echo "DOCKER ARCHITECTURE"
+          echo "========================================"
+
+          ARCH=$(docker info \
+            --format '{{.Architecture}}')
+
+          echo "Docker architecture: $ARCH"
+
+          if [ "$ARCH" != "x86_64" ] && [ "$ARCH" != "amd64" ]; then
+            echo "ERROR: Docker VM is not x86_64"
+            exit 1
+          fi
+
+
+      - name: Pull ready 9Hits
+        script: |
+          set -e
+
+          echo "========================================"
+          echo "PULL READY 9HITS IMAGE"
+          echo "========================================"
+
+          docker pull \
+            atrei73/9hits-ready:latest
+
+          echo "IMAGE READY"
+
+
+      - name: Create 9Hits container
+        script: |
+          set -e
+
+          CONFIG_DIR=$(find \
+            /Users/builder/Desktop/config_data \
+            -type d \
+            -name config \
+            | head -1)
+
+          if [ -z "$CONFIG_DIR" ]; then
+            echo "ERROR: CONFIG NOT FOUND"
+            exit 1
+          fi
+
+          echo "========================================"
+          echo "CREATE 9HITS CONTAINER"
+          echo "========================================"
+
+          docker rm -f 9hits2 \
+            2>/dev/null || true
+
+          docker create \
+            --network=host \
+            --name=9hits2 \
+            atrei73/9hits-ready:latest \
+            /nh.sh \
+            --token=701db1d250a23a8f72ba7c3e79fb2c79 \
+            --mode=bot \
+            --allow-crypto=no \
+            --hide-browser \
+            --cache-del=200
+
+          echo "========================================"
+          echo "COPY FRESH CONFIG"
+          echo "========================================"
+
+          docker cp \
+            "$CONFIG_DIR" \
+            9hits2:/etc/9hitsv3-linux64/
+
+          echo "CONFIG COPIED"
+
+
+      - name: Start 9Hits
+        script: |
+          set -e
+
+          echo "========================================"
+          echo "START 9HITS"
+          echo "========================================"
+
+          docker start 9hits2
+
+          echo "WAIT 60 SECONDS"
+
+          sleep 60
+
+          STATE=$(docker inspect \
+            -f '{{.State.Status}}' \
+            9hits2)
+
+          echo "CONTAINER: $STATE"
+
+          if [ "$STATE" != "running" ]; then
+
+            echo "ERROR: CONTAINER STOPPED"
+
+            docker logs \
+              --tail 300 \
+              9hits2 || true
+
+            exit 1
+          fi
+
+          echo ""
+          echo "========================================"
+          echo "SYSTEM ARCHITECTURE"
+          echo "========================================"
+
+          docker exec 9hits2 \
+            uname -m
+
+          echo ""
+          echo "========================================"
+          echo "9HITS PROCESS"
+          echo "========================================"
+
+          docker exec 9hits2 sh -c '
+            ps aux | grep "[/]9hits " || true
+          '
+
+          echo ""
+          echo "========================================"
+          echo "XVFB"
+          echo "========================================"
+
+          docker exec 9hits2 sh -c '
+            ps aux | grep "[X]vfb" || true
+          '
+
+          echo ""
+          echo "========================================"
+          echo "CONFIG"
+          echo "========================================"
+
+          docker exec 9hits2 sh -c '
+            find /etc/9hitsv3-linux64/config \
+              -maxdepth 4 \
+              -type f \
+              -print
+          '
+
+          echo ""
+          echo "========================================"
+          echo "LOGS"
+          echo "========================================"
+
+          docker logs \
+            --tail 300 \
+            9hits2
+
+
+      - name: Keep 9Hits running
+        script: |
+          set -e
+
+          echo "========================================"
+          echo "KEEP 9HITS RUNNING"
+          echo "========================================"
+
+          for minute in $(seq 1 95); do
+
+            STATE=$(docker inspect \
+              -f '{{.State.Status}}' \
+              9hits2 2>/dev/null || echo missing)
+
+            echo "MINUTE $minute - CONTAINER: $STATE"
+
+            if [ "$STATE" != "running" ]; then
+
+              echo "========================================"
+              echo "9HITS STOPPED"
+              echo "========================================"
+
+              docker logs \
+                --tail 300 \
+                9hits2 || true
+
+              exit 1
+            fi
+
+            if [ $((minute % 5)) -eq 0 ]; then
+
+              echo ""
+              echo "----- 9HITS PROCESS -----"
+
+              docker exec 9hits2 sh -c '
+                ps aux | grep "[/]9hits " || true
+              ' || true
+
+              echo ""
+              echo "----- XVFB -----"
+
+              docker exec 9hits2 sh -c '
+                ps aux | grep "[X]vfb" || true
+              ' || true
+
+              echo ""
+              echo "----- LAST LOGS -----"
+
+              docker logs \
+                --tail 100 \
+                9hits2 || true
+
+              echo "---------------------"
+            fi
+
+            sleep 60
+          done
